@@ -1,5 +1,5 @@
 //! Full end-to-end test: key config fetched over HTTP from a gateway, the
-//! encapsulated request POSTed (via `bitreq`) to a real `ohttp-relay`, which
+//! encapsulated request POSTed (via `bitreq`) to the harness relay, which
 //! forwards it to the gateway, which forwards the inner request to a target
 //! on a different origin than the gateway.
 
@@ -197,17 +197,9 @@ fn e2e_fetch_key_config_and_send_with_bitreq() {
     assert_eq!(response.body(), b"POST /echo?x=1 hello");
 }
 
-/// [`OhttpClient::from_gateway`] tunnels the key fetch through an HTTP
-/// `CONNECT` proxy instead of dialing the gateway directly, so the gateway
+/// [`OhttpClient::from_gateway`] tunnels the key fetch through the relay
+/// with HTTP `CONNECT` instead of dialing the gateway directly, so the gateway
 /// never learns the client's IP even for that bootstrap request.
-///
-/// The harness's generic `CONNECT` proxy stands in for a relay here: real
-/// relays such as `ohttp-relay` implement the same `CONNECT` tunneling (its
-/// `connect-bootstrap` feature), typically gated behind a gateway opt-in
-/// check that assumes an HTTPS gateway origin, which our plain-HTTP test
-/// gateway can't satisfy. That gating is a relay-operator policy concern
-/// orthogonal to what's being tested here: that `from_gateway` correctly
-/// tunnels the key GET and parses what comes back.
 #[cfg(feature = "bitreq")]
 #[test]
 fn e2e_from_gateway() {
@@ -216,7 +208,7 @@ fn e2e_from_gateway() {
 
     let client = runtime
         .block_on(OhttpClient::from_gateway(
-            Url::parse(harness.connect_proxy_url()).unwrap(),
+            Url::parse(harness.relay_url()).unwrap(),
             Url::parse(harness.target_url()).unwrap(),
             harness.gateway_url(),
         ))

@@ -70,7 +70,7 @@ mod wasm;
 #[cfg(feature = "wasm")]
 pub use wasm::{EncapsulateBuilder, Encapsulated, WasmOhttpClient, WasmResponse};
 
-/// End-to-end test utilities: local target, gateway, relay, and CONNECT proxy.
+/// End-to-end test utilities: local target, gateway, and relay.
 ///
 /// Enable with the `harness` feature (typically as a `dev-dependency`):
 /// ```toml

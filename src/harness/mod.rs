@@ -1,18 +1,14 @@
 //! End-to-end test harness: a target HTTP server, an OHTTP gateway serving
-//! its key config, an OHTTP relay ([`ohttp_relay`]) in front of it, and a
-//! generic HTTP `CONNECT` proxy standing in for a relay's key-fetch tunnel.
+//! its key config, and an OHTTP relay in front of it.
 //!
-//! The target and gateway are minimal hand-rolled HTTP/1.1 servers on
-//! std-thread [`TcpListener`]s; the relay runs on a background tokio runtime.
-//! The `CONNECT` proxy is a second hand-rolled server: `ohttp-relay`'s own
-//! CONNECT bootstrap gates on an HTTPS-only gateway opt-in probe that our
-//! plain-HTTP test gateway can't satisfy, but `CONNECT` tunneling itself is a
-//! generic HTTP mechanism, so a minimal standalone proxy exercises the same
-//! client-side behavior. Everything shuts down gracefully when the
-//! [`TestHarness`] is dropped.
+//! All three are minimal hand-rolled HTTP/1.1 servers on std-thread
+//! [`TcpListener`]s. The relay forwards encapsulated `POST`s to the gateway
+//! and also accepts `CONNECT`, tunneling the client's key fetch so the
+//! gateway never sees the client's address. Everything shuts down gracefully
+//! when the [`TestHarness`] is dropped.
 
-mod connect_proxy;
 mod gateway;
+mod relay;
 mod server;
 
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -20,8 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use connect_proxy::serve_connect_proxy;
 use gateway::handle_gateway_request;
+use relay::serve_relay;
 use server::serve;
 
 const GATEWAY_PATH: &str = "/.well-known/ohttp-gateway";
@@ -30,11 +26,9 @@ pub struct TestHarness {
     relay_url: String,
     gateway_url: String,
     target_url: String,
-    connect_proxy_url: String,
     shutdown: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
     server_addrs: Vec<SocketAddr>,
-    relay_rt: Option<tokio::runtime::Runtime>,
 }
 
 impl TestHarness {
@@ -58,7 +52,7 @@ impl TestHarness {
             )
         }));
 
-        // Gateway: serves its key config, opts in to relaying, and
+        // Gateway: serves its key config and
         // decapsulates requests, forwarding them to the inner target.
         let key_config = ohttp::KeyConfig::new(
             1,
@@ -77,50 +71,29 @@ impl TestHarness {
             handle_gateway_request(&ohttp_server, req)
         }));
 
-        // Relay: the real ohttp-relay crate, forwarding to the gateway.
-        // `free_port` + bind is racy under parallel tests; retry on EADDRINUSE.
-        let gateway_uri: ohttp_relay::GatewayUri =
-            format!("http://127.0.0.1:{}", gateway_addr.port())
-                .parse()
-                .unwrap();
-        let relay_rt = tokio::runtime::Runtime::new().unwrap();
-        let relay_port = {
-            let mut last_err = None;
-            let mut bound = None;
-            for _ in 0..16 {
-                let port = free_port();
-                match relay_rt.block_on(ohttp_relay::listen_tcp(port, gateway_uri.clone())) {
-                    Ok(_handle) => {
-                        bound = Some(port);
-                        break;
-                    }
-                    Err(err) => last_err = Some(err),
-                }
-            }
-            bound.unwrap_or_else(|| {
-                panic!("failed to bind ohttp-relay after retries: {:?}", last_err)
-            })
-        };
-
-        // Generic CONNECT proxy: stands in for a relay's key-fetch tunnel.
-        let connect_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let connect_addr = connect_listener.local_addr().unwrap();
-        server_addrs.push(connect_addr);
-        threads.push(serve_connect_proxy(connect_listener, shutdown.clone()));
+        // Relay: forwards to the gateway and tunnels key fetches.
+        let gateway_url = format!("http://127.0.0.1:{}{}", gateway_addr.port(), GATEWAY_PATH);
+        let relay_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay_addr = relay_listener.local_addr().unwrap();
+        server_addrs.push(relay_addr);
+        threads.push(serve_relay(
+            relay_listener,
+            gateway_url.clone(),
+            shutdown.clone(),
+        ));
 
         TestHarness {
-            relay_url: format!("http://127.0.0.1:{relay_port}/"),
-            gateway_url: format!("http://127.0.0.1:{}{}", gateway_addr.port(), GATEWAY_PATH),
+            relay_url: format!("http://127.0.0.1:{}/", relay_addr.port()),
+            gateway_url,
             target_url: format!("http://127.0.0.1:{}", target_addr.port()),
-            connect_proxy_url: format!("http://127.0.0.1:{}/", connect_addr.port()),
             shutdown,
             threads,
             server_addrs,
-            relay_rt: Some(relay_rt),
         }
     }
 
-    /// URL the encapsulated request is POSTed to.
+    /// Relay URL: POST encapsulated requests here, or use it as the HTTP
+    /// `CONNECT` proxy for the key fetch.
     pub fn relay_url(&self) -> &str {
         &self.relay_url
     }
@@ -134,12 +107,6 @@ impl TestHarness {
     pub fn target_url(&self) -> &str {
         &self.target_url
     }
-
-    /// URL of a generic HTTP `CONNECT` proxy, standing in for a relay's
-    /// key-fetch tunnel.
-    pub fn connect_proxy_url(&self) -> &str {
-        &self.connect_proxy_url
-    }
 }
 
 impl Drop for TestHarness {
@@ -152,16 +119,5 @@ impl Drop for TestHarness {
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
-        if let Some(rt) = self.relay_rt.take() {
-            rt.shutdown_background();
-        }
     }
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
 }

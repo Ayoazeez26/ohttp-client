@@ -43,7 +43,7 @@ pub(super) fn serve(
     })
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
+pub(super) fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
     let mut reader = BufReader::new(stream);
 
     let mut request_line = String::new();
@@ -80,8 +80,13 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
     Some(HttpRequest { body, ..req })
 }
 
-fn write_response(stream: &mut TcpStream, status: u16, headers: &[(String, String)], body: &[u8]) {
-    // `connection: close` keeps the relay's pooled hyper client from reusing
+pub(super) fn write_response(
+    stream: &mut TcpStream,
+    status: u16,
+    headers: &[(String, String)],
+    body: &[u8],
+) {
+    // `connection: close` keeps pooled HTTP clients from reusing
     // a connection this one-request-per-connection server has already closed.
     let mut response = format!(
         "HTTP/1.1 {status} OK\r\ncontent-length: {}\r\nconnection: close\r\n",

@@ -1,28 +1,16 @@
-//! The OHTTP gateway: serves its key config and relay opt-in, and
-//! decapsulates requests, forwarding them to the inner target.
+//! The OHTTP gateway: serves its key config and decapsulates requests,
+//! forwarding them to the inner target.
 
 use std::io::Cursor;
 
 use super::server::HttpRequest;
 use super::GATEWAY_PATH;
 
-/// Gateway opt-in advertised to the relay's prober: ALPN-style list
-/// containing the one purpose `ohttp_relay` requires before it forwards.
-const ALLOWED_PURPOSES_BODY: &[u8] = b"\x00\x01\x2aTEST 454403bb-9f7b-4385-b31f-acd2dae20b7e";
-
 pub(super) fn handle_gateway_request(
     server: &ohttp::Server,
     req: HttpRequest,
 ) -> (u16, Vec<(String, String)>, Vec<u8>) {
     match (req.method.as_str(), req.path.split('?').next().unwrap()) {
-        ("GET", GATEWAY_PATH) if req.path.contains("allowed_purposes") => (
-            200,
-            vec![(
-                "content-type".into(),
-                "application/x-ohttp-allowed-purposes".into(),
-            )],
-            ALLOWED_PURPOSES_BODY.to_vec(),
-        ),
         ("GET", GATEWAY_PATH) => (
             200,
             vec![("content-type".into(), "application/ohttp-keys".into())],
