@@ -1,6 +1,6 @@
 [package]
 name = "ohttp-client"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "Minimal Rust OHTTP client"
 license = "MIT"
