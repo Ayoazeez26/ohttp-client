@@ -4,8 +4,8 @@ version = "0.0.1"
 edition = "2021"
 description = "Minimal Rust OHTTP client"
 license = "MIT"
-homepage = "https://github.com/arminsabouri/ohttp-client"
-repository = "https://github.com/arminsabouri/ohttp-client"
+homepage = "https://github.com/fungi-protocol/ohttp-client"
+repository = "https://github.com/fungi-protocol/ohttp-client"
 keywords = ["networking", "OHTTP", "cryptography"]
 categories = ["cryptography", "network-programming", "web-programming::http-client"]
 
