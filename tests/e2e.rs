@@ -1,7 +1,4 @@
-//! Full end-to-end test: key config fetched over HTTP from a gateway, the
-//! encapsulated request POSTed (via `bitreq`) to the harness relay, which
-//! forwards it to the gateway, which forwards the inner request to a target
-//! on a different origin than the gateway.
+//! Client -> relay -> gateway -> target round trips against the harness.
 
 use ohttp_client::harness::TestHarness;
 use ohttp_client::{parse_key_config, OhttpClient, Url};
@@ -10,7 +7,6 @@ use ohttp_client::{parse_key_config, OhttpClient, Url};
 fn e2e_through_relay_and_gateway() {
     let harness = TestHarness::start();
 
-    // Bootstrap: fetch the key config from the gateway ourselves (sans-IO).
     let keys_res = bitreq::get(harness.gateway_url()).send().unwrap();
     assert_eq!(keys_res.status_code, 200);
     assert_eq!(
@@ -24,7 +20,6 @@ fn e2e_through_relay_and_gateway() {
         parse_key_config(keys_res.as_bytes()).unwrap(),
     );
 
-    // Encapsulate, send the outer request to the relay ourselves, decapsulate.
     let (req, ctx) = client
         .encapsulate(
             "POST",
@@ -53,14 +48,11 @@ fn e2e_through_relay_and_gateway() {
     let response = ctx.decapsulate(outer_res.as_bytes()).unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(response.header("content-type"), Some(&b"text/plain"[..]));
-    // The target echoes "<method> <path> <body>", proving the inner request
-    // traversed relay -> gateway -> target intact.
+    // The target echoes "<method> <path> <body>".
     assert_eq!(response.body(), b"POST /echo?x=1 hello");
 }
 
-/// With a fixed BHTTP plaintext
-/// length so trailing random padding is present. Proves the gateway's
-/// `read_bhttp` ignores the pad and the rest of the stack still works.
+/// The gateway ignores the random padding after a known-length message.
 #[test]
 fn e2e_with_known_length_padding() {
     let harness = TestHarness::start();
@@ -87,8 +79,6 @@ fn e2e_with_known_length_padding() {
         )
         .unwrap();
 
-    // Ciphertext should be larger than an unpadded encapsulation of the same
-    // request (same AEAD overhead, longer plaintext).
     let (unpadded, _) = OhttpClient::new(
         Url::parse(harness.relay_url()).unwrap(),
         Url::parse(harness.target_url()).unwrap(),
@@ -127,9 +117,7 @@ fn e2e_with_known_length_padding() {
     assert_eq!(response.body(), b"POST /echo?x=1 hello");
 }
 
-/// Same round trip, but the client sends the outer request itself via the
-/// `bitreq` feature's async request builder. Key fetching still goes through
-/// the crate's sans-IO `parse_key_config` fed by our own bitreq GET here.
+/// The outer request is sent by the `bitreq` request builder.
 #[cfg(feature = "bitreq")]
 #[test]
 fn e2e_send_with_bitreq_feature() {
@@ -160,21 +148,18 @@ fn e2e_send_with_bitreq_feature() {
     assert_eq!(response.body(), b"POST /echo?x=1 hello");
 }
 
-/// The fully `bitreq`-powered flow: the crate itself fetches the gateway key
-/// config *and* sends the outer request, both over `bitreq`.
-///
-/// Key fetch is direct (not via `CONNECT`) so we can bind the real OHTTP
-/// relay for encapsulated requests. For the privacy-preserving bootstrap,
-/// see `e2e_from_gateway`.
+/// The crate fetches the key config directly and sends the outer request,
+/// both with `bitreq`.
 #[cfg(feature = "bitreq")]
 #[test]
 fn e2e_fetch_key_config_and_send_with_bitreq() {
     let harness = TestHarness::start();
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
-    let key_config = runtime
-        .block_on(ohttp_client::fetch_key_config(harness.gateway_url()))
-        .unwrap();
+    let keys_res = bitreq::get(harness.gateway_url()).send().unwrap();
+    assert_eq!(keys_res.status_code, 200);
+    let key_config = parse_key_config(keys_res.as_bytes()).unwrap();
+
     let client = OhttpClient::new(
         Url::parse(harness.relay_url()).unwrap(),
         Url::parse(harness.target_url()).unwrap(),
@@ -197,9 +182,7 @@ fn e2e_fetch_key_config_and_send_with_bitreq() {
     assert_eq!(response.body(), b"POST /echo?x=1 hello");
 }
 
-/// [`OhttpClient::from_gateway`] tunnels the key fetch through the relay
-/// with HTTP `CONNECT` instead of dialing the gateway directly, so the gateway
-/// never learns the client's IP even for that bootstrap request.
+/// [`OhttpClient::from_gateway`] fetches the key config through the relay
 #[cfg(feature = "bitreq")]
 #[test]
 fn e2e_from_gateway() {
@@ -214,8 +197,7 @@ fn e2e_from_gateway() {
         ))
         .unwrap();
 
-    // Prove the tunneled fetch produced a working key config by using it for
-    // a normal encapsulate/decapsulate round trip against the gateway.
+    // The tunneled key config works for a round trip.
     let (req, ctx) = client
         .encapsulate(
             "POST",
@@ -238,9 +220,8 @@ fn e2e_from_gateway() {
     assert_eq!(response.body(), b"POST /echo?x=1 hello");
 }
 
-/// Same relay -> gateway -> target path, exercised through the `wasm-bindgen`
-/// API surface (`WasmOhttpClient` / `Encapsulated`). The host still does HTTP
-/// with `bitreq`; in a browser that would be `fetch`.
+/// Round trip through the `wasm-bindgen` API, with `bitreq` in place of
+/// `fetch`.
 #[cfg(feature = "wasm")]
 #[test]
 fn e2e_wasm_bindgen_api() {

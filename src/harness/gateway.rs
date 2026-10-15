@@ -1,5 +1,5 @@
-//! The OHTTP gateway: serves its key config and decapsulates requests,
-//! forwarding them to the inner target.
+//! OHTTP gateway: serves its key config and forwards decapsulated requests
+//! to the target.
 
 use std::io::Cursor;
 
@@ -36,8 +36,6 @@ pub(super) fn handle_gateway_request(
     }
 }
 
-/// Send the decapsulated inner request to the authority it names and build
-/// the inner BHTTP response from what comes back.
 fn forward_to_target(inner: &bhttp::Message) -> bhttp::Message {
     let part = |v: Option<&[u8]>| String::from_utf8(v.unwrap().to_vec()).unwrap();
     let method = part(inner.control().method());

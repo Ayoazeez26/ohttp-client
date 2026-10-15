@@ -1,7 +1,5 @@
-//! Prints harness URLs as one JSON line on stdout, then parks until killed.
-//!
-//! Used by the JS e2e test. Start with:
-//! `cargo run --features harness --bin ohttp-test-harness`
+//! Starts a [`TestHarness`] for the JS e2e, prints its URLs as one JSON line,
+//! and runs until killed.
 
 use ohttp_client::harness::TestHarness;
 

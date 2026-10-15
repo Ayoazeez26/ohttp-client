@@ -1,6 +1,4 @@
-//! `wasm-bindgen` surface for browser hosts that do their own `fetch`.
-//!
-//! Enable with `--features wasm` (implies `wasm_js`).
+//! `wasm-bindgen` exports for browser hosts that do their own `fetch`.
 
 use wasm_bindgen::prelude::*;
 
@@ -10,11 +8,8 @@ fn js_err(err: impl std::fmt::Display) -> JsError {
     JsError::new(&err.to_string())
 }
 
-/// Browser-facing OHTTP client. Encapsulate here; send the outer request with
-/// `fetch` (or equivalent), then [`Encapsulated::decapsulate`].
-///
-/// Construct with a target origin; pass a path on that origin to
-/// [`encapsulate`](WasmOhttpClient::encapsulate) per request.
+/// [`OhttpClient`] for JS. The host sends the outer request and passes the
+/// response to [`Encapsulated::decapsulate`].
 #[wasm_bindgen(js_name = OhttpClient)]
 pub struct WasmOhttpClient {
     inner: OhttpClient,
@@ -32,13 +27,13 @@ impl WasmOhttpClient {
         })
     }
 
-    /// Pad every encapsulated request's BHTTP plaintext to exactly `n` bytes.
+    /// See [`OhttpClient::known_length`].
     pub fn known_length(mut self, n: usize) -> WasmOhttpClient {
         self.inner = self.inner.known_length(n);
         self
     }
 
-    /// Start building an encapsulated request to `path` on the target origin.
+    /// Start a request to `path` on the target origin.
     pub fn encapsulate(&self, method: &str, path: &str) -> EncapsulateBuilder {
         EncapsulateBuilder {
             client: self.inner.clone(),
@@ -51,7 +46,6 @@ impl WasmOhttpClient {
     }
 }
 
-/// Builder for a single encapsulated request.
 #[wasm_bindgen]
 pub struct EncapsulateBuilder {
     client: OhttpClient,
@@ -109,7 +103,7 @@ impl EncapsulateBuilder {
     }
 }
 
-/// Outer request plus the one-shot decapsulation context.
+/// Outer request and the context that decapsulates its response.
 #[wasm_bindgen]
 pub struct Encapsulated {
     url: String,
@@ -135,7 +129,7 @@ impl Encapsulated {
         self.body.clone()
     }
 
-    /// Decapsulate the raw body of the relay's response.
+    /// Decapsulate the relay's response body.
     pub fn decapsulate(self, response_body: &[u8]) -> Result<WasmResponse, JsError> {
         self.context
             .decapsulate(response_body)
@@ -144,7 +138,7 @@ impl Encapsulated {
     }
 }
 
-/// Decapsulated inner HTTP response.
+/// Decapsulated inner response.
 #[wasm_bindgen(js_name = OhttpResponse)]
 pub struct WasmResponse(Response);
 
@@ -160,7 +154,7 @@ impl WasmResponse {
         self.0.body().to_vec()
     }
 
-    /// Value of the first header with the given name (case-insensitive).
+    /// First value of header `name`, matched case-insensitively.
     pub fn header(&self, name: &str) -> Option<Vec<u8>> {
         self.0.header(name).map(|v| v.to_vec())
     }

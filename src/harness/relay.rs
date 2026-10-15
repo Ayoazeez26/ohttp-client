@@ -1,5 +1,4 @@
-//! The OHTTP relay: forwards encapsulated `POST`s to the gateway and tunnels
-//! `CONNECT`s, the key-fetch bootstrap, to the authority they name.
+//! OHTTP relay: forwards `POST`s to the gateway and tunnels `CONNECT`s.
 
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
@@ -9,8 +8,7 @@ use std::thread::JoinHandle;
 
 use super::server::{read_request, write_response, HttpRequest};
 
-/// Relay accept loop. Each connection gets its own thread because a
-/// `CONNECT` tunnel stays open for as long as the client uses it.
+/// One thread per connection, since a `CONNECT` tunnel stays open.
 pub(super) fn serve_relay(
     listener: TcpListener,
     gateway_url: String,
@@ -39,9 +37,7 @@ pub(super) fn serve_relay(
     })
 }
 
-/// Forward the encapsulated request to the gateway with only its content
-/// type (RFC 9458 Section 5), and pass back the gateway's status, content
-/// type and content.
+/// Forward only the content type and body (RFC 9458 Section 5).
 fn forward_to_gateway(client: &mut TcpStream, gateway_url: &str, req: HttpRequest) {
     let mut forward = bitreq::post(gateway_url);
     if let Some(content_type) = req.header("content-type") {
@@ -59,8 +55,7 @@ fn forward_to_gateway(client: &mut TcpStream, gateway_url: &str, req: HttpReques
     write_response(client, res.status_code as u16, &headers, res.as_bytes());
 }
 
-/// Dial `authority`, reply `200`, then pipe bytes both ways until either
-/// side closes.
+/// Pipe bytes between `client` and `authority` until either side closes.
 fn tunnel(mut client: TcpStream, authority: &str) -> Option<()> {
     let mut upstream = TcpStream::connect(authority).ok()?;
     client

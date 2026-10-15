@@ -1,9 +1,10 @@
-//! Optional `bitreq` integration: key-config fetch and an async request builder
-//! that encapsulate / send / decapsulate in one call.
+//! `bitreq` integration: key config fetch and a request builder that sends
+//! through the relay.
 
 use crate::{parse_key_config, Error, KeyConfig, OhttpClient, Response, Url};
 
-/// GET the gateway's key endpoint with `bitreq` and parse the result.
+/// GET the gateway's key endpoint directly. This reveals the caller's IP to
+/// the gateway; [`fetch_key_config_via_relay`] does not.
 pub async fn fetch_key_config(gateway_key_url: &str) -> Result<KeyConfig, Error> {
     let res = bitreq::get(gateway_key_url).send_async().await?;
     if res.status_code != 200 {
@@ -12,14 +13,8 @@ pub async fn fetch_key_config(gateway_key_url: &str) -> Result<KeyConfig, Error>
     parse_key_config(res.as_bytes())
 }
 
-/// GET the gateway's key endpoint tunneled through the relay via HTTP
-/// `CONNECT`, rather than dialing the gateway directly.
-///
-/// A direct GET reveals the client's IP address to the gateway before any
-/// encapsulated request is ever sent, defeating the IP-hiding purpose of
-/// routing those requests through a relay. Tunneling the key fetch through
-/// the relay too (as `ohttp-relay`'s `connect-bootstrap` feature supports)
-/// means the gateway only ever sees the relay's IP.
+/// GET the gateway's key endpoint through the relay with HTTP `CONNECT`, so
+/// the gateway only sees the relay's IP.
 pub async fn fetch_key_config_via_relay(
     gateway_key_url: &str,
     relay_url: &Url,
@@ -40,15 +35,8 @@ pub async fn fetch_key_config_via_relay(
 }
 
 impl OhttpClient {
-    /// Fetch the gateway key config through the relay (HTTP `CONNECT`) and
-    /// build a client.
-    ///
-    /// Prefer this over dialing the gateway yourself and calling [`Self::new`]:
-    /// the gateway never sees the caller's IP, even for the bootstrap key
-    /// fetch. See [`fetch_key_config_via_relay`].
-    ///
-    /// `target` is the origin used to resolve per-request paths (see
-    /// [`Self::new`]).
+    /// Fetch the key config with [`fetch_key_config_via_relay`] and build a
+    /// client. See [`Self::new`] for `target`.
     pub async fn from_gateway(
         relay: Url,
         target: Url,
@@ -58,12 +46,8 @@ impl OhttpClient {
         Ok(Self::new(relay, target, key_config))
     }
 
-    /// Start building an inner request with the given method and path on the
-    /// client's target origin.
-    ///
-    /// [`RequestBuilder::send`] encapsulates, sends via `bitreq`, and
-    /// decapsulates in one call. `path` must stay on the target origin (see
-    /// [`OhttpClient::encapsulate`]).
+    /// Start a request to `path` on the target origin. See
+    /// [`Self::encapsulate`] for how `path` resolves.
     pub fn request(
         &self,
         method: impl Into<String>,
@@ -79,55 +63,45 @@ impl OhttpClient {
         }
     }
 
-    /// Shorthand for [`request("GET", path)`](Self::request).
     pub fn get(&self, path: impl Into<String>) -> RequestBuilder<'_> {
         self.request("GET", path)
     }
 
-    /// Shorthand for [`request("HEAD", path)`](Self::request).
     pub fn head(&self, path: impl Into<String>) -> RequestBuilder<'_> {
         self.request("HEAD", path)
     }
 
-    /// Shorthand for [`request("POST", path)`](Self::request).
     pub fn post(&self, path: impl Into<String>) -> RequestBuilder<'_> {
         self.request("POST", path)
     }
 
-    /// Shorthand for [`request("PUT", path)`](Self::request).
     pub fn put(&self, path: impl Into<String>) -> RequestBuilder<'_> {
         self.request("PUT", path)
     }
 
-    /// Shorthand for [`request("DELETE", path)`](Self::request).
     pub fn delete(&self, path: impl Into<String>) -> RequestBuilder<'_> {
         self.request("DELETE", path)
     }
 
-    /// Shorthand for [`request("CONNECT", path)`](Self::request).
     pub fn connect(&self, path: impl Into<String>) -> RequestBuilder<'_> {
         self.request("CONNECT", path)
     }
 
-    /// Shorthand for [`request("OPTIONS", path)`](Self::request).
     pub fn options(&self, path: impl Into<String>) -> RequestBuilder<'_> {
         self.request("OPTIONS", path)
     }
 
-    /// Shorthand for [`request("TRACE", path)`](Self::request).
     pub fn trace(&self, path: impl Into<String>) -> RequestBuilder<'_> {
         self.request("TRACE", path)
     }
 
-    /// Shorthand for [`request("PATCH", path)`](Self::request).
     pub fn patch(&self, path: impl Into<String>) -> RequestBuilder<'_> {
         self.request("PATCH", path)
     }
 }
 
-/// Builds an inner request against a path on the client's target origin, then
-/// sends it through the relay with `bitreq`. Created by [`OhttpClient::request`]
-/// and friends.
+/// Inner request sent through the relay with `bitreq`. Created by
+/// [`OhttpClient::request`].
 #[must_use = "call `send()` to perform the request"]
 pub struct RequestBuilder<'a> {
     client: &'a OhttpClient,
@@ -139,30 +113,24 @@ pub struct RequestBuilder<'a> {
 }
 
 impl RequestBuilder<'_> {
-    /// Add a header to the inner request.
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
     }
 
-    /// Add a query parameter to the inner request URL.
-    ///
-    /// The key and value are percent-encoded when the request is sent.
-    /// Parameters are appended after any query already present on the
-    /// resolved path/URL.
+    /// Add a query parameter, percent-encoded on send.
     pub fn param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.params.push((key.into(), value.into()));
         self
     }
 
-    /// Set the inner request body.
     pub fn body(mut self, body: impl Into<Vec<u8>>) -> Self {
         self.body = Some(body.into());
         self
     }
 
-    /// Encapsulate the inner request, POST it to the relay, and decapsulate
-    /// the inner response.
+    /// Encapsulate, POST to the relay, and decapsulate the response. Fails
+    /// with [`Error::UnexpectedStatus`] unless the relay returns 200.
     pub async fn send(self) -> Result<Response, Error> {
         let headers: Vec<(&str, &str)> = self
             .headers

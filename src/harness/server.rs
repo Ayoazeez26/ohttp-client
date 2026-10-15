@@ -1,4 +1,4 @@
-//! Minimal hand-rolled HTTP/1.1 server shared by the target and gateway.
+//! Minimal HTTP/1.1 server for the target and gateway.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -22,8 +22,7 @@ impl HttpRequest {
     }
 }
 
-/// Minimal HTTP/1.1 server loop: one connection at a time, one request per
-/// connection.
+/// Serve one request per connection, one connection at a time.
 pub(super) fn serve(
     listener: TcpListener,
     shutdown: Arc<AtomicBool>,
@@ -86,8 +85,7 @@ pub(super) fn write_response(
     headers: &[(String, String)],
     body: &[u8],
 ) {
-    // `connection: close` keeps pooled HTTP clients from reusing
-    // a connection this one-request-per-connection server has already closed.
+    // Keep pooled clients from reusing a connection this server closes.
     let mut response = format!(
         "HTTP/1.1 {status} OK\r\ncontent-length: {}\r\nconnection: close\r\n",
         body.len()

@@ -1,11 +1,6 @@
-//! End-to-end test harness: a target HTTP server, an OHTTP gateway serving
-//! its key config, and an OHTTP relay in front of it.
-//!
-//! All three are minimal hand-rolled HTTP/1.1 servers on std-thread
-//! [`TcpListener`]s. The relay forwards encapsulated `POST`s to the gateway
-//! and also accepts `CONNECT`, tunneling the client's key fetch so the
-//! gateway never sees the client's address. Everything shuts down gracefully
-//! when the [`TestHarness`] is dropped.
+//! Local target, OHTTP gateway and OHTTP relay for end-to-end tests. Each is a
+//! hand-rolled HTTP/1.1 server on its own thread, stopped when the
+//! [`TestHarness`] drops.
 
 mod gateway;
 mod relay;
@@ -37,8 +32,7 @@ impl TestHarness {
         let mut threads = Vec::new();
         let mut server_addrs = Vec::new();
 
-        // Target: the resource the inner request is addressed to. It echoes
-        // the request line and body so the test can assert what came through.
+        // Target: echoes the method, path and body.
         let target_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let target_addr = target_listener.local_addr().unwrap();
         server_addrs.push(target_addr);
@@ -52,8 +46,7 @@ impl TestHarness {
             )
         }));
 
-        // Gateway: serves its key config and
-        // decapsulates requests, forwarding them to the inner target.
+        // Gateway.
         let key_config = ohttp::KeyConfig::new(
             1,
             ohttp::hpke::Kem::X25519Sha256,
@@ -71,7 +64,7 @@ impl TestHarness {
             handle_gateway_request(&ohttp_server, req)
         }));
 
-        // Relay: forwards to the gateway and tunnels key fetches.
+        // Relay.
         let gateway_url = format!("http://127.0.0.1:{}{}", gateway_addr.port(), GATEWAY_PATH);
         let relay_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let relay_addr = relay_listener.local_addr().unwrap();
@@ -92,18 +85,18 @@ impl TestHarness {
         }
     }
 
-    /// Relay URL: POST encapsulated requests here, or use it as the HTTP
-    /// `CONNECT` proxy for the key fetch.
+    /// POST encapsulated requests here, or use it as a `CONNECT` proxy for
+    /// the key fetch.
     pub fn relay_url(&self) -> &str {
         &self.relay_url
     }
 
-    /// RFC 9540 gateway endpoint; GET it to fetch the key config.
+    /// Gateway key endpoint (RFC 9540).
     pub fn gateway_url(&self) -> &str {
         &self.gateway_url
     }
 
-    /// Base URL of the target resource (distinct from the gateway).
+    /// Target base URL, on a different origin than the gateway.
     pub fn target_url(&self) -> &str {
         &self.target_url
     }

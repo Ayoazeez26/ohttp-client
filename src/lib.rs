@@ -1,17 +1,13 @@
-//! Minimal sans-IO [Oblivious HTTP](https://www.rfc-editor.org/rfc/rfc9458) client.
+//! Sans-IO [Oblivious HTTP](https://www.rfc-editor.org/rfc/rfc9458) client.
 //!
-//! This crate handles the boilerplate every OHTTP client needs — BHTTP inner
-//! message construction and parsing, encapsulation/decapsulation, and key
-//! config parsing — without performing any network IO itself. You send the
-//! outer request with whatever HTTP client you like and feed the raw response
-//! bytes back in.
+//! Builds and encapsulates BHTTP inner requests, decapsulates responses, and
+//! parses gateway key configs. The caller sends the outer request.
 //!
 //! ```no_run
 //! use ohttp_client::{OhttpClient, Url, parse_key_config};
 //!
 //! # fn send(req: &ohttp_client::OhttpRequest) -> Vec<u8> { unimplemented!() }
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // 1. GET the gateway's key endpoint yourself, then build a client.
 //! let key_bytes: Vec<u8> = /* GET https://gateway.example/ohttp-keys */
 //! #    vec![];
 //! let client = OhttpClient::new(
@@ -20,8 +16,7 @@
 //!     parse_key_config(&key_bytes)?,
 //! );
 //!
-//! // 2. Encapsulate; POST `req.body` to `req.url` with `req.content_type`.
-//! //    Path is per-request (origin is fixed on the client).
+//! // POST `req.body` to `req.url` with `req.content_type`.
 //! let (req, ctx) = client.encapsulate(
 //!     "POST",
 //!     "/resource",
@@ -30,25 +25,15 @@
 //!     Some(b"hello"),
 //! )?;
 //! let outer_response_body = send(&req);
-//!
-//! // 3. Decapsulate the raw response body to get the inner response.
 //! let response = ctx.decapsulate(&outer_response_body)?;
 //! assert_eq!(response.status(), 200);
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! With the optional `bitreq` feature, `bitreq` can also do the IO for you:
-//! [`OhttpClient::from_gateway`] fetches the key config (tunneled through the
-//! relay) and builds the client, and a request builder does encapsulate/send/
-//! decapsulate:
-//! `client.post("/resource").header("content-type", "text/plain").body("hello").send().await?`.
-//!
-//! For `wasm32-unknown-unknown` (browsers), enable the `wasm` feature for
-//! [`wasm-bindgen`](https://rustwasm.github.io/wasm-bindgen/) exports (and the
-//! JS RNG backend). Keep using the sans-IO flow from JS: encapsulate, `fetch`
-//! the outer request yourself, then decapsulate. WASI needs no extra feature;
-//! `wasm_js` alone is enough if you bind the Rust API without `wasm-bindgen`.
+//! The `bitreq` feature adds `OhttpClient::from_gateway` and a request
+//! builder that do the IO. The `wasm` feature adds `wasm-bindgen` exports for
+//! browsers.
 
 use std::io::Cursor;
 use std::sync::Once;
@@ -70,13 +55,6 @@ mod wasm;
 #[cfg(feature = "wasm")]
 pub use wasm::{EncapsulateBuilder, Encapsulated, WasmOhttpClient, WasmResponse};
 
-/// End-to-end test utilities: local target, gateway, and relay.
-///
-/// Enable with the `harness` feature (typically as a `dev-dependency`):
-/// ```toml
-/// [dev-dependencies]
-/// ohttp-client = { version = "...", features = ["harness"] }
-/// ```
 #[cfg(feature = "harness")]
 pub mod harness;
 
@@ -138,11 +116,8 @@ impl KeyConfig {
     }
 }
 
-/// Parse the body of a gateway key endpoint response
-/// (`application/ohttp-keys`, RFC 9540) into the first usable [`KeyConfig`].
-///
-/// Gateways may advertise several configs for clients of differing
-/// capabilities; unusable ones are skipped.
+/// Parse an `application/ohttp-keys` body (RFC 9540) and return the first
+/// config this build can use.
 pub fn parse_key_config(bytes: &[u8]) -> Result<KeyConfig, Error> {
     init();
     let mut configs = Vec::new();
@@ -163,15 +138,12 @@ pub fn parse_key_config(bytes: &[u8]) -> Result<KeyConfig, Error> {
         .ok_or(Error::NoKeyConfig)
 }
 
-/// Whether `config` kept at least one symmetric suite this build supports.
+/// Whether `config` has a symmetric suite left after decoding.
 ///
-/// `KeyConfig::decode` strips unsupported KDF/AEAD pairs without rejecting a
-/// config left with none (e.g. one offering only AES-256-GCM), and
-/// `ohttp::ClientRequest::from_config` then panics indexing the empty list.
-///
-/// Suites are private, so this reads `encode`, which round-trips the stripped
-/// list: an empty one ends in its own zero length field, a non-empty one in an
-/// AEAD id, and id 0 is reserved (`decode` rejects it).
+/// `decode` drops unsupported suites but keeps a config with none, which makes
+/// `ohttp::ClientRequest::from_config` panic. Suites are private, so this
+/// checks the encoding: an empty suite list ends in a zero length field, and a
+/// non-empty one ends in a nonzero AEAD id.
 fn has_usable_suite(config: &KeyConfig) -> bool {
     config.encode().is_ok_and(|enc| !enc.ends_with(&[0, 0]))
 }
@@ -185,34 +157,21 @@ fn init() {
     });
 }
 
-/// An OHTTP client bound to a relay, a target origin, and a gateway key config.
+/// An OHTTP client for one relay, target origin and gateway key config.
 ///
-/// Construct with [`OhttpClient::new`] when you already have a key config, or
-/// with [`OhttpClient::from_gateway`] (requires the `bitreq` feature) to fetch
-/// the key config through the relay. Then call [`encapsulate`] per request with
-/// a path on that origin — the client holds the origin, not a fixed resource
-/// path (e.g. many Esplora paths on one API origin).
-/// The target origin may differ from the gateway; after construction the
-/// gateway URL itself is not needed — only its key config.
-///
-/// Optionally set a [`known_length`](OhttpClient::known_length) to pad every
-/// encapsulated request's BHTTP plaintext to a fixed size.
-///
-/// [`encapsulate`]: OhttpClient::encapsulate
+/// Each [`encapsulate`](Self::encapsulate) call takes a path on the target
+/// origin. The target may differ from the gateway.
 #[derive(Debug, Clone)]
 pub struct OhttpClient {
     key_config: KeyConfig,
     relay: Url,
-    /// Target origin (scheme + host [+ port] [+ base path]).
+    /// Origin plus an optional base path.
     target: Url,
     known_length: Option<usize>,
 }
 
 impl OhttpClient {
-    /// Bind a client to a relay, target origin, and already-known gateway key config.
-    ///
-    /// `target` is the API base URL whose path is prepended to each request
-    /// path in [`encapsulate`](Self::encapsulate) (e.g. `https://mempool.space/api`).
+    /// `target` is the base URL that request paths are appended to.
     pub fn new(relay: Url, target: Url, key_config: KeyConfig) -> Self {
         init();
         Self {
@@ -223,26 +182,22 @@ impl OhttpClient {
         }
     }
 
-    /// Pad every encapsulated request's BHTTP plaintext to exactly
-    /// `known_length` bytes (random fill, then the BHTTP message written at
-    /// the start). Encapsulation returns [`Error::KnownLengthTooSmall`] if a
-    /// message does not fit.
+    /// Pad each BHTTP inner request to `known_length` bytes with random
+    /// trailing bytes. Encapsulation fails with [`Error::KnownLengthTooSmall`]
+    /// if a request is longer.
     pub fn known_length(mut self, known_length: usize) -> Self {
         self.known_length = Some(known_length);
         self
     }
 
-    /// Encapsulate an inner request to `path` on this client's target origin.
+    /// Encapsulate an inner request to `path` on the target origin.
     ///
-    /// `path` is appended to the target's path with slash normalization
-    /// (e.g. target `https://mempool.space/api` + `"/tx/abc"` →
-    /// `https://mempool.space/api/tx/abc`).
+    /// `path` is appended to the target's path, and `query` pairs are
+    /// percent-encoded and appended to its query. Returns the outer request to
+    /// POST to the relay and the context that decapsulates its response.
     ///
-    /// `query` pairs are percent-encoded and appended to the resolved URL's
-    /// query string (after any query already present on `path` or the target).
-    ///
-    /// Returns the outer request to POST to the relay yourself, and the
-    /// one-shot context that decapsulates the corresponding response body.
+    /// Fails with [`Error::PathEscapesOrigin`] if `path` is an absolute URL or
+    /// leaves the target origin.
     pub fn encapsulate(
         &self,
         method: &str,
@@ -299,10 +254,8 @@ impl OhttpClient {
     }
 }
 
-/// Append `path` onto `base`'s path (slash-normalized), keeping `base`'s origin.
-///
-/// Unlike [`Url::join`], a leading `/` on `path` does not replace `base`'s path:
-/// `https://example/api` + `/tx/abc` → `https://example/api/tx/abc`.
+/// Append `path` to `base`'s path. Unlike [`Url::join`], a leading `/` does
+/// not replace `base`'s path.
 fn resolve_target(base: &Url, path: &str) -> Result<Url, Error> {
     if path.starts_with("//") || Url::parse(path).is_ok() {
         return Err(Error::PathEscapesOrigin);
@@ -336,7 +289,7 @@ fn resolve_target(base: &Url, path: &str) -> Result<Url, Error> {
     Ok(target)
 }
 
-/// `"/api"` + `"/tx/abc"` → `"/api/tx/abc"`; also works without a leading slash on `path`.
+/// Join two URL paths with a single `/` between them.
 fn append_paths(base: &str, path: &str) -> String {
     let base = base.trim_end_matches('/');
     let path = path.trim_start_matches('/');
@@ -353,10 +306,8 @@ fn append_paths(base: &str, path: &str) -> String {
     }
 }
 
-/// Serialize `inner` as known-length BHTTP, optionally padded to `known_length`.
-///
-/// When padding, the buffer is filled with random bytes first and the BHTTP
-/// message is then written at the start, leaving random trailing padding.
+/// Serialize `inner` as known-length BHTTP, padded with random bytes to
+/// `known_length` if set.
 fn write_bhttp_payload(inner: &Message, known_length: Option<usize>) -> Result<Vec<u8>, Error> {
     let mut msg = Vec::new();
     inner.write_bhttp(Mode::KnownLength, &mut msg)?;
@@ -375,8 +326,7 @@ fn write_bhttp_payload(inner: &Message, known_length: Option<usize>) -> Result<V
     Ok(buf)
 }
 
-/// The outer request to send to the relay with your own HTTP client:
-/// `POST {url}` with `Content-Type: {content_type}` and `{body}` as the body.
+/// Outer request: POST `body` to `url` with `content_type`.
 #[derive(Debug, Clone)]
 pub struct OhttpRequest {
     pub url: Url,
@@ -384,8 +334,7 @@ pub struct OhttpRequest {
     pub body: Vec<u8>,
 }
 
-/// One-shot context to decapsulate the response to a single encapsulated
-/// request. Consumed by [`decapsulate`](ResponseContext::decapsulate).
+/// Decapsulates the response to one encapsulated request.
 pub struct ResponseContext(ResponseContextInner);
 
 enum ResponseContextInner {
@@ -395,7 +344,7 @@ enum ResponseContextInner {
 }
 
 impl ResponseContext {
-    /// Decapsulate the raw body of the relay's response into the inner response.
+    /// Decapsulate the relay's response body.
     pub fn decapsulate(self, encapsulated: &[u8]) -> Result<Response, Error> {
         let bhttp_bytes = match self.0 {
             ResponseContextInner::Ohttp(ctx) => ctx.decapsulate(encapsulated)?,
@@ -417,7 +366,7 @@ impl ResponseContext {
     }
 }
 
-/// The decapsulated inner response from the target.
+/// Decapsulated inner response.
 #[derive(Debug, Clone)]
 pub struct Response {
     status: u16,
@@ -430,7 +379,7 @@ impl Response {
         self.status
     }
 
-    /// Value of the first header with the given name (case-insensitive).
+    /// First value of header `name`, matched case-insensitively.
     pub fn header(&self, name: &str) -> Option<&[u8]> {
         self.headers
             .iter()
