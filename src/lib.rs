@@ -55,7 +55,6 @@ use std::sync::Once;
 
 use bhttp::{Message, Mode};
 
-pub use ohttp::KeyConfig;
 pub use url::Url;
 
 mod error;
@@ -84,6 +83,61 @@ pub mod harness;
 /// Media type of an encapsulated request, per RFC 9458.
 pub const OHTTP_REQ_CONTENT_TYPE: &str = "message/ohttp-req";
 
+/// A gateway key config, held by whichever OHTTP backend supports its KEM.
+#[derive(Debug, Clone)]
+pub struct KeyConfig(KeyConfigInner);
+
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // One per client.
+enum KeyConfigInner {
+    Ohttp(ohttp::KeyConfig),
+    #[cfg(feature = "secp256k1")]
+    Secp256k1(bitcoin_ohttp::KeyConfig),
+}
+
+impl From<ohttp::KeyConfig> for KeyConfig {
+    fn from(config: ohttp::KeyConfig) -> Self {
+        Self(KeyConfigInner::Ohttp(config))
+    }
+}
+
+#[cfg(feature = "secp256k1")]
+impl From<bitcoin_ohttp::KeyConfig> for KeyConfig {
+    fn from(config: bitcoin_ohttp::KeyConfig) -> Self {
+        Self(KeyConfigInner::Secp256k1(config))
+    }
+}
+
+impl KeyConfig {
+    /// Decode one config with the backend that supports its KEM, or `None`
+    /// if no backend in this build does.
+    fn decode(encoded: &[u8]) -> Result<Option<Self>, Error> {
+        match ohttp::KeyConfig::decode(encoded) {
+            Ok(config) => return Ok(Some(config.into())),
+            Err(ohttp::Error::Unsupported) => {}
+            Err(e) => return Err(e.into()),
+        }
+        // FIXME: `bitcoin-ohttp` 0.6 keeps AES-128-GCM suites when decoding, but
+        // its secp256k1 sender cannot use them: a config listing AES-128-GCM
+        // before ChaCha20Poly1305 fails to encapsulate with `InvalidKeyType`.
+        #[cfg(feature = "secp256k1")]
+        match bitcoin_ohttp::KeyConfig::decode(encoded) {
+            Ok(config) => return Ok(Some(config.into())),
+            Err(bitcoin_ohttp::Error::Unsupported) => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(None)
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, Error> {
+        Ok(match &self.0 {
+            KeyConfigInner::Ohttp(config) => config.encode()?,
+            #[cfg(feature = "secp256k1")]
+            KeyConfigInner::Secp256k1(config) => config.encode()?,
+        })
+    }
+}
+
 /// Parse the body of a gateway key endpoint response
 /// (`application/ohttp-keys`, RFC 9540) into the first usable [`KeyConfig`].
 ///
@@ -91,7 +145,19 @@ pub const OHTTP_REQ_CONTENT_TYPE: &str = "message/ohttp-req";
 /// capabilities; unusable ones are skipped.
 pub fn parse_key_config(bytes: &[u8]) -> Result<KeyConfig, Error> {
     init();
-    KeyConfig::decode_list(bytes)?
+    let mut configs = Vec::new();
+    let mut rest = bytes;
+    while let Some((len, tail)) = rest.split_first_chunk::<2>() {
+        let (config, tail) = tail
+            .split_at_checked(usize::from(u16::from_be_bytes(*len)))
+            .ok_or(ohttp::Error::Truncated)?;
+        configs.extend(KeyConfig::decode(config)?);
+        rest = tail;
+    }
+    if !rest.is_empty() {
+        return Err(ohttp::Error::Truncated.into());
+    }
+    configs
         .into_iter()
         .find(has_usable_suite)
         .ok_or(Error::NoKeyConfig)
@@ -112,7 +178,11 @@ fn has_usable_suite(config: &KeyConfig) -> bool {
 
 fn init() {
     static INIT: Once = Once::new();
-    INIT.call_once(ohttp::init);
+    INIT.call_once(|| {
+        ohttp::init();
+        #[cfg(feature = "secp256k1")]
+        bitcoin_ohttp::init();
+    });
 }
 
 /// An OHTTP client bound to a relay, a target origin, and a gateway key config.
@@ -204,8 +274,20 @@ impl OhttpClient {
         }
         let bhttp_bytes = write_bhttp_payload(&inner, self.known_length)?;
 
-        let (encapsulated, ctx) = ohttp::ClientRequest::from_config(&mut self.key_config.clone())?
-            .encapsulate(&bhttp_bytes)?;
+        let (encapsulated, ctx) = match &self.key_config.0 {
+            KeyConfigInner::Ohttp(config) => {
+                let (encapsulated, ctx) = ohttp::ClientRequest::from_config(&mut config.clone())?
+                    .encapsulate(&bhttp_bytes)?;
+                (encapsulated, ResponseContextInner::Ohttp(ctx))
+            }
+            #[cfg(feature = "secp256k1")]
+            KeyConfigInner::Secp256k1(config) => {
+                let (encapsulated, ctx) =
+                    bitcoin_ohttp::ClientRequest::from_config(&mut config.clone())?
+                        .encapsulate(&bhttp_bytes)?;
+                (encapsulated, ResponseContextInner::Secp256k1(ctx))
+            }
+        };
         Ok((
             OhttpRequest {
                 url: self.relay.clone(),
@@ -304,12 +386,22 @@ pub struct OhttpRequest {
 
 /// One-shot context to decapsulate the response to a single encapsulated
 /// request. Consumed by [`decapsulate`](ResponseContext::decapsulate).
-pub struct ResponseContext(ohttp::ClientResponse);
+pub struct ResponseContext(ResponseContextInner);
+
+enum ResponseContextInner {
+    Ohttp(ohttp::ClientResponse),
+    #[cfg(feature = "secp256k1")]
+    Secp256k1(bitcoin_ohttp::ClientResponse),
+}
 
 impl ResponseContext {
     /// Decapsulate the raw body of the relay's response into the inner response.
     pub fn decapsulate(self, encapsulated: &[u8]) -> Result<Response, Error> {
-        let bhttp_bytes = self.0.decapsulate(encapsulated)?;
+        let bhttp_bytes = match self.0 {
+            ResponseContextInner::Ohttp(ctx) => ctx.decapsulate(encapsulated)?,
+            #[cfg(feature = "secp256k1")]
+            ResponseContextInner::Secp256k1(ctx) => ctx.decapsulate(encapsulated)?,
+        };
         let inner = Message::read_bhttp(&mut Cursor::new(&bhttp_bytes[..]))?;
         let status = inner.control().status().ok_or(Error::NotAResponse)?.code();
         let headers = inner
@@ -365,7 +457,7 @@ impl Response {
 mod tests {
     use super::*;
     use ohttp::hpke::{Aead, Kdf, Kem};
-    use ohttp::SymmetricSuite;
+    use ohttp::{KeyConfig, SymmetricSuite};
 
     /// Every KEM `ohttp` implements, including the post-quantum X-Wing.
     const SUPPORTED_KEMS: [Kem; 3] = [Kem::X25519Sha256, Kem::P256Sha256, Kem::XWing];
@@ -384,11 +476,11 @@ mod tests {
         .unwrap()
     }
 
-    fn test_client(config: KeyConfig) -> OhttpClient {
+    fn test_client(config: impl Into<crate::KeyConfig>) -> OhttpClient {
         OhttpClient::new(
             Url::parse("https://relay.example/").unwrap(),
             Url::parse("https://target.example:8443/").unwrap(),
-            config,
+            config.into(),
         )
     }
 
@@ -450,7 +542,7 @@ mod tests {
         let client = OhttpClient::new(
             Url::parse("https://relay.example/").unwrap(),
             Url::parse("https://target.example/").unwrap(),
-            server.config().clone(),
+            server.config().clone().into(),
         );
 
         let (req, _) = client
@@ -475,7 +567,7 @@ mod tests {
         let client = OhttpClient::new(
             Url::parse("https://relay.example/").unwrap(),
             Url::parse("https://target.example/").unwrap(),
-            test_key_config(),
+            test_key_config().into(),
         );
 
         assert!(matches!(
@@ -495,7 +587,7 @@ mod tests {
         let client = OhttpClient::new(
             Url::parse("https://relay.example/").unwrap(),
             Url::parse("https://target.example/api").unwrap(),
-            server.config().clone(),
+            server.config().clone().into(),
         );
 
         let (req, _) = client
@@ -563,6 +655,41 @@ mod tests {
             assert_eq!(response.status(), 200);
             assert_eq!(response.body(), b"ok");
         }
+    }
+
+    #[cfg(feature = "secp256k1")]
+    #[test]
+    fn round_trips_with_secp256k1() {
+        use bitcoin_ohttp::hpke::{Aead, Kdf, Kem};
+
+        init();
+        let config = bitcoin_ohttp::KeyConfig::new(
+            1,
+            Kem::K256Sha256,
+            vec![bitcoin_ohttp::SymmetricSuite::new(
+                Kdf::HkdfSha256,
+                Aead::ChaCha20Poly1305,
+            )],
+        )
+        .unwrap();
+        let server = bitcoin_ohttp::Server::new(config).unwrap();
+        let encoded = bitcoin_ohttp::KeyConfig::encode_list(&[server.config()]).unwrap();
+        let client = test_client(parse_key_config(&encoded).unwrap());
+
+        let (req, ctx) = client.encapsulate("GET", "/", &[], &[], None).unwrap();
+        let (_, server_ctx) = server.decapsulate(&req.body).unwrap();
+
+        let mut inner_res = Message::response(bhttp::StatusCode::try_from(200u16).unwrap());
+        inner_res.write_content(b"ok");
+        let mut res_bytes = Vec::new();
+        inner_res
+            .write_bhttp(Mode::KnownLength, &mut res_bytes)
+            .unwrap();
+        let enc_res = server_ctx.encapsulate(&res_bytes).unwrap();
+
+        let response = ctx.decapsulate(&enc_res).unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), b"ok");
     }
 
     /// Encode `configs` as an `application/ohttp-keys` list, prefixing each

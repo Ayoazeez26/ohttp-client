@@ -2,6 +2,9 @@
 pub enum Error {
     #[error("ohttp: {0}")]
     Ohttp(#[from] ohttp::Error),
+    #[cfg(feature = "secp256k1")]
+    #[error("bitcoin-ohttp: {0}")]
+    BitcoinOhttp(#[from] bitcoin_ohttp::Error),
     #[error("bhttp: {0}")]
     Bhttp(#[from] bhttp::Error),
     #[error("url: {0}")]

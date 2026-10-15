@@ -12,6 +12,10 @@ The client uses whichever KEM a gateway advertises, so it works with every KEM
 [`ohttp`](https://crates.io/crates/ohttp) implements: DHKEM(X25519, HKDF-SHA256),
 DHKEM(P-256, HKDF-SHA256), and X-Wing (ML-KEM-768 + X25519).
 
+The experimental `secp256k1` feature adds DHKEM(secp256k1, HKDF-SHA256) via
+[`bitcoin-ohttp`](https://crates.io/crates/bitcoin-ohttp), alongside the KEMs
+above. Each key config is handled by the backend that supports its KEM.
+
 ## Sans-IO by default
 
 By default the crate does **no network IO**. You encapsulate a request, send the
