@@ -3,19 +3,9 @@
 
 use crate::{parse_key_config, Error, KeyConfig, OhttpClient, Response, Url};
 
-/// GET the gateway's key endpoint directly. This reveals the caller's IP to
-/// the gateway; [`fetch_key_config_via_relay`] does not.
-pub async fn fetch_key_config(gateway_key_url: &str) -> Result<KeyConfig, Error> {
-    let res = bitreq::get(gateway_key_url).send_async().await?;
-    if res.status_code != 200 {
-        return Err(Error::UnexpectedStatus(res.status_code));
-    }
-    parse_key_config(res.as_bytes())
-}
-
 /// GET the gateway's key endpoint through the relay with HTTP `CONNECT`, so
 /// the gateway only sees the relay's IP.
-pub async fn fetch_key_config_via_relay(
+async fn fetch_key_config_via_relay(
     gateway_key_url: &str,
     relay_url: &Url,
 ) -> Result<KeyConfig, Error> {

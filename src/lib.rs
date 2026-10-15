@@ -48,7 +48,7 @@ pub use error::Error;
 #[cfg(feature = "bitreq")]
 mod http;
 #[cfg(feature = "bitreq")]
-pub use http::{fetch_key_config, fetch_key_config_via_relay, RequestBuilder};
+pub use http::RequestBuilder;
 
 #[cfg(feature = "wasm")]
 mod wasm;
